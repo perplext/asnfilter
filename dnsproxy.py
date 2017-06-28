@@ -1,12 +1,17 @@
 import encodings.idna
 import grp
+import logging
 import os
 import pwd
+import signal
 import socket
+import sys
 
 import geoip2.database
 import redis
 import yaml
+
+from netaddr import IPAddress, IPNetwork
 
 from twisted.internet import reactor, defer
 from twisted.names import client, dns, error, server
@@ -17,6 +22,12 @@ idna = encodings.idna
 
 r = None
 reader = None
+
+ip_whitelist = []
+ip_blacklist = []
+
+logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+dnsproxylog = logging.getLogger('dnsproxy')
 
 
 # Credit: https://stackoverflow.com/a/2699996
@@ -33,6 +44,15 @@ def drop_privileges(uid_name='nobody', gid_name='nobody'):
     os.setuid(running_uid)
 
 
+def reload_ip_lists(signum, frame):
+    global ip_whitelist, ip_blacklist, r
+
+    print("Loading IP lists.")
+
+    ip_whitelist = r.smembers('ASNfilter/ip_whitelist')
+    ip_blacklist = r.smembers('ASNfilter/ip_blacklist')
+
+
 def get_ASN(ip_address):
     global reader
 
@@ -44,14 +64,22 @@ def get_ASN(ip_address):
     return asn
 
 
+def match_ip(ip_address, ip_list):
+    for ip in ip_list:
+        if IPAddress(ip_address) in IPNetwork(ip.decode('utf-8')):
+            return True
+
+    return False
+
+
 def responseFilter(ip_address):
     global r
 
     try:
-        if r.sismember('ASNfilter/ip_whitelist', ip_address):
+        if match_ip(ip_address, ip_whitelist):
             return False
 
-        if r.sismember('ASNfilter/ip_blacklist', ip_address):
+        if match_ip(ip_address, ip_blacklist):
             return True
 
         asn = get_ASN(ip_address)
@@ -67,7 +95,7 @@ def responseFilter(ip_address):
                        str(asn.autonomous_system_number)):
             return True
     except:
-        raise
+        return False
 
     return False
 
@@ -88,6 +116,7 @@ def queriesFilter(queries):
 class ASNFilterResolver(client.Resolver):
     def __init__(self, resolv=None, servers=None, timeout=(1, 3, 11, 45),
                  reactor=None):
+        self.log = logging.getLogger('query')
         self._queryUDP = client.Resolver.queryUDP
         self._queryTCP = client.Resolver.queryTCP
 
@@ -108,6 +137,7 @@ class ASNFilterResolver(client.Resolver):
 
 class ASNFilterDNSServerFactory(server.DNSServerFactory):
     def __init__(self, authorities=None, caches=None, clients=None, verbose=0):
+        self.log = logging.getLogger('response')
         self._sendReply = server.DNSServerFactory.sendReply
 
         server.DNSServerFactory.__init__(self, authorities, caches, clients,
@@ -140,8 +170,9 @@ class ASNFilterDNSServerFactory(server.DNSServerFactory):
 
 
 def main():
-    global r, reader
+    global dnsproxylog, ip_blacklist, r, reader
 
+    dnsproxylog.info('Loading config.yml')
     with open('config.yml') as f:
         config = yaml.load(f.read())
 
@@ -165,6 +196,11 @@ def main():
 
     drop_privileges(config['dnsproxy']['user'],
                     config['dnsproxy']['group'])
+
+    r.set('ASNfilter/PID', os.getpid())
+
+    reload_ip_lists(0, 0)
+    signal.signal(signal.SIGHUP, reload_ip_lists)
 
     reactor.run()
 

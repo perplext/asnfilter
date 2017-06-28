@@ -1,4 +1,10 @@
+#!/usr/bin/env python
+#
+# Updates the IPs and hosts blacklists
+#
 import uuid
+
+from urllib.parse import urlparse
 
 import redis
 import requests
@@ -30,26 +36,32 @@ def get_update(url):
         raise
 
 
-def populate_from_hosts_url(url):
-    print('Updating hosts from: ' + url)
+def populate_from_url(url, blacklist):
+    print('Updating ' + blacklist + ' from: ' + url)
 
+    bkey = 'ASNfilter/sources/' + blacklist + '_list'
     key = 'ASNfilter/sources/' + url
     update = get_update(url)
 
     if update is None:
-        r.sadd('ASNfilter/sources/hosts_list', key)
+        r.sadd(bkey, key)
 
         print('Nothing new.')
 
         return
 
-    hosts = []
+    entries = []
     for line in update.splitlines():
         if line.startswith('#') or line.startswith('/') or line.isspace() or \
                 len(line) == 0:
             continue
 
         fields = line.split()
+
+        if blacklist == 'ips':
+            entries.append(fields[0].strip())
+            continue
+
         if len(fields) > 1:
             if fields[1].strip().startswith('#'):
                 entry = fields[0].strip()
@@ -59,22 +71,17 @@ def populate_from_hosts_url(url):
             entry = fields[0].strip()
 
         if '/' not in entry:
-            hosts.append(entry)
+            entries.append(entry)
+        else:
+            entries.append(urlparse(entry).netloc)
 
     key = 'ASNfilter/sources/' + url
 
     r.delete(key)
-    r.sadd(key, *hosts)
-    r.sadd('ASNfilter/sources/hosts_list', key)
+    r.sadd(key, *entries)
+    r.sadd(bkey, key)
 
-    print('Added ' + str(r.scard(key)) + ' hosts')
-
-
-def populate_from_ips_url(url):
-    print('updating ips from: ' + url)
-
-    update = get_update(url)
-    print(update)
+    print('Added ' + str(r.scard(key)) + ' entries')
 
 
 def main():
@@ -88,15 +95,21 @@ def main():
 
     r.delete('ASNfilter/sources/hosts_list')
     for url in config['sources']['hosts']:
-        populate_from_hosts_url(url)
+        populate_from_url(url, 'hosts')
 
     r.sunionstore('ASNfilter/host_blacklist',
                   r.smembers('ASNfilter/sources/hosts_list'))
 
     print('Total hosts: ' + str(r.scard('ASNfilter/host_blacklist')))
 
-    # for url in config['sources']['ips']:
-    #     populate_from_ips_url(url)
+    r.delete('ASNfilter/sources/ips_list')
+    for url in config['sources']['ips']:
+        populate_from_url(url, 'ips')
+
+    r.sunionstore('ASNfilter/ip_blacklist',
+                  r.smembers('ASNfilter/sources/ips_list'))
+
+    print('Total IPs: ' + str(r.scard('ASNfilter/ip_blacklist')))
 
 
 if __name__ == '__main__':
