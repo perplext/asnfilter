@@ -2,6 +2,7 @@
 #
 # scrape WaLLy3K's Big Blocklist Collection
 # return Lists bulleted with a tick have no notable false positives
+#
 
 import requests
 

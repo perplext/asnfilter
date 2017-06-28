@@ -2,6 +2,7 @@
 #
 # Updates the IPs and hosts blacklists
 #
+
 import uuid
 
 from urllib.parse import urlparse

@@ -1,3 +1,8 @@
+#!/usr/bin/env python
+#
+# DNS Proxy for ASNfilter
+#
+
 import encodings.idna
 import grp
 import logging
@@ -45,12 +50,12 @@ def drop_privileges(uid_name='nobody', gid_name='nobody'):
 
 
 def reload_ip_lists(signum, frame):
-    global ip_whitelist, ip_blacklist, r
-
-    print("Loading IP lists.")
+    global dnsproxylog, ip_whitelist, ip_blacklist, r
 
     ip_whitelist = r.smembers('ASNfilter/ip_whitelist')
     ip_blacklist = r.smembers('ASNfilter/ip_blacklist')
+
+    dnsproxylog.info('Loaded IP lists')
 
 
 def get_ASN(ip_address):
@@ -72,27 +77,36 @@ def match_ip(ip_address, ip_list):
     return False
 
 
-def responseFilter(ip_address):
+def responseFilter(ip_address, log):
     global r
 
     try:
         if match_ip(ip_address, ip_whitelist):
+            log.info('Allowed because ' + ip_address + ' in IP whitelist')
             return False
 
         if match_ip(ip_address, ip_blacklist):
+            log.info('Denied because ' + ip_address + ' in IP blacklist')
             return True
 
         asn = get_ASN(ip_address)
 
+        r.sadd('ASNfilter/ASNs', str(asn.autonomous_system_number))
         r.set('ASNfilter/ASN/' + str(asn.autonomous_system_number),
               asn.autonomous_system_organization)
 
         if r.sismember('ASNfilter/asn_whitelist',
                        str(asn.autonomous_system_number)):
+            log.info('Allowed because ' + ip_address + ' in ASN whitelist:' +
+                     str(asn.autonomous_system_number) +
+                     ' (' + asn.autonomous_system_organization + ')')
             return False
 
         if r.sismember('ASNfilter/asn_blacklist',
                        str(asn.autonomous_system_number)):
+            log.info('Denied because ' + ip_address + ' in ASN blacklist:' +
+                     str(asn.autonomous_system_number) +
+                     ' (' + asn.autonomous_system_organization + ')')
             return True
     except:
         return False
@@ -100,14 +114,18 @@ def responseFilter(ip_address):
     return False
 
 
-def queriesFilter(queries):
+def queriesFilter(queries, log):
     global r
 
     for query in queries:
         if r.sismember('ASNfilter/host_whitelist', query.name.name.lower()):
+            log.info('Allowed because ' + query.name.name.decode('utf-8') +
+                     ' in host whitelist')
             return False
 
         if r.sismember('ASNfilter/host_blacklist', query.name.name.lower()):
+            log.info('Denied because ' + query.name.name.decode('utf-8') +
+                     ' in host blacklist')
             return True
 
     return False
@@ -123,13 +141,13 @@ class ASNFilterResolver(client.Resolver):
         client.Resolver.__init__(self, resolv, servers, timeout, reactor)
 
     def queryUDP(self, queries, timeout=None):
-        if queriesFilter(queries):
+        if queriesFilter(queries, self.log):
             return defer.fail(error.DomainError())
         else:
             return self._queryUDP(self, queries, timeout)
 
     def queryTCP(self, queries, timeout=10):
-        if queriesFilter(queries):
+        if queriesFilter(queries, self.log):
             return defer.fail(error.DomainError())
         else:
             return self._queryTCP(self, queries, timeout)
@@ -149,14 +167,14 @@ class ASNFilterDNSServerFactory(server.DNSServerFactory):
             if answer.type == A:
                 ip_address = answer.payload.dottedQuad()
 
-                if responseFilter(ip_address):
+                if responseFilter(ip_address, self.log):
                     filtered = True
                     break
             elif answer.type == AAAA:
                 ip_address = socket.inet_ntop(socket.AF_INET6,
                                               answer.payload.address)
 
-                if responseFilter(ip_address):
+                if responseFilter(ip_address, self.log):
                     filtered = True
                     break
             else:
