@@ -1,4 +1,3 @@
-import configparser
 import encodings.idna
 import grp
 import os
@@ -7,6 +6,7 @@ import socket
 
 import geoip2.database
 import redis
+import yaml
 
 from twisted.internet import reactor, defer
 from twisted.names import client, dns, error, server
@@ -19,7 +19,7 @@ r = None
 reader = None
 
 
-# https://stackoverflow.com/a/2699996
+# Credit: https://stackoverflow.com/a/2699996
 def drop_privileges(uid_name='nobody', gid_name='nobody'):
     if os.getuid() != 0:
         return
@@ -48,6 +48,9 @@ def responseFilter(ip_address):
     global r
 
     try:
+        if r.sismember('ASNfilter/ip_whitelist', ip_address):
+            return False
+
         if r.sismember('ASNfilter/ip_blacklist', ip_address):
             return True
 
@@ -55,23 +58,14 @@ def responseFilter(ip_address):
 
         r.set('ASNfilter/ASN/' + str(asn.autonomous_system_number),
               asn.autonomous_system_organization)
-        r.sadd('ASNfilter/list', str(asn.autonomous_system_number))
 
-        mode = r.get('ASNfilter/mode')
+        if r.sismember('ASNfilter/asn_whitelist',
+                       str(asn.autonomous_system_number)):
+            return False
 
-        if mode is None:
-            r.set('ASNfilter/mode', b'learning')
-            mode = b'learning'
-
-        if mode == b'blacklist':
-            if r.sismember('ASNfilter/asn_blacklist',
-                           str(asn.autonomous_system_number)):
-                return True
-
-        if mode == b'whitelist':
-            if r.sismember('ASNfilter/asn_whitelist',
-                           str(asn.autonomous_system_number)):
-                return True
+        if r.sismember('ASNfilter/asn_blacklist',
+                       str(asn.autonomous_system_number)):
+            return True
     except:
         raise
 
@@ -82,7 +76,10 @@ def queriesFilter(queries):
     global r
 
     for query in queries:
-        if r.sismember('ASNfilter/hosts_blacklist', query.name.name.lower()):
+        if r.sismember('ASNfilter/host_whitelist', query.name.name.lower()):
+            return False
+
+        if r.sismember('ASNfilter/host_blacklist', query.name.name.lower()):
             return True
 
     return False
@@ -145,17 +142,17 @@ class ASNFilterDNSServerFactory(server.DNSServerFactory):
 def main():
     global r, reader
 
-    config = configparser.ConfigParser()
-    config.read('asnfilter.conf')
+    with open('config.yml') as f:
+        config = yaml.load(f.read())
 
-    pool = redis.ConnectionPool.from_url(config.get('asnfilter', 'redisurl'))
+    pool = redis.ConnectionPool.from_url(config['dnsproxy']['redis'])
     r = redis.StrictRedis(connection_pool=pool)
 
-    reader = geoip2.database.Reader(config.get('asnfilter', 'asndb'))
+    reader = geoip2.database.Reader(config['dnsproxy']['asndb'])
 
     servers = []
-    for entry in config.get('asnfilter', 'servers').split(','):
-        servers.append((entry.replace(' ', ''), 53))
+    for entry in config['dnsproxy']['servers']:
+        servers.append((entry, 53))
 
     factory = ASNFilterDNSServerFactory(
         clients=[ASNFilterResolver(servers=servers)]
@@ -163,11 +160,11 @@ def main():
 
     protocol = dns.DNSDatagramProtocol(controller=factory)
 
-    reactor.listenUDP(int(config.get('asnfilter', 'port')), protocol)
-    reactor.listenTCP(int(config.get('asnfilter', 'port')), factory)
+    reactor.listenUDP(config['dnsproxy']['port'], protocol)
+    reactor.listenTCP(config['dnsproxy']['port'], factory)
 
-    drop_privileges(config.get('asnfilter', 'user'),
-                    config.get('asnfilter', 'group'))
+    drop_privileges(config['dnsproxy']['user'],
+                    config['dnsproxy']['group'])
 
     reactor.run()
 
