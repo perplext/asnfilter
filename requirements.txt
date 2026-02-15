@@ -14,5 +14,5 @@ redis==2.10.5
 requests==2.32.4
 six==1.10.0
 Twisted==24.7.0rc1
-urllib3==2.6.0
+urllib3==2.6.3
 zope.interface==4.4.2
